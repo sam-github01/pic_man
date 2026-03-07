@@ -9,9 +9,18 @@ import pandas as pd
 import uuid
 
 # -----------------------------------------------------------------------------
-# 0. API Key 設定與驗證區塊
+# 0. API Key 設定與驗證區塊 (安全升級版)
 # -----------------------------------------------------------------------------
-DEFAULT_API_KEY = "AIzaSyB5OKzPztex0L-yDucKQg9H2ZHoXvb2quo"
+# 嘗試從 Streamlit Secrets 安全讀取 API Key
+def get_default_api_key():
+    try:
+        # 讀取隱藏在環境變數中的金鑰
+        return st.secrets["GEMINI_API_KEY"]
+    except KeyError:
+        # 如果雲端沒有設定，就回傳空字串，這會觸發下方的輸入視窗
+        return ""
+
+DEFAULT_API_KEY = get_default_api_key()
 
 def validate_api_key(api_key):
     if not api_key:
@@ -26,6 +35,8 @@ def validate_api_key(api_key):
 @st.dialog("⚠️ 系統提示：API Key 無效或未設定")
 def api_key_dialog():
     st.write("請輸入有效的 Google Gemini API Key 以啟動 AI 影像分析功能：")
+    # 提醒使用者這個視窗的作用
+    st.caption("提示：由於系統未偵測到環境變數中的金鑰，請手動輸入。")
     user_key = st.text_input("API Key", type="password", placeholder="AIzaSy...")
     
     if st.button("驗證並開始使用", width="stretch"):
