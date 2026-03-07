@@ -11,7 +11,7 @@ import uuid
 # -----------------------------------------------------------------------------
 # 0. API Key 設定與驗證區塊
 # -----------------------------------------------------------------------------
-DEFAULT_API_KEY = "AIzaSyANj4QNdWonZ-1B0rIxR9RADQaZe7Mnn-8"
+DEFAULT_API_KEY = "AIzaSyB5OKzPztex0L-yDucKQg9H2ZHoXvb2quo"
 
 def validate_api_key(api_key):
     if not api_key:
