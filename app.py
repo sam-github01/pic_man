@@ -165,6 +165,7 @@ with tab_upload:
                         body=file_metadata, media_body=media, fields='id'
                     ).execute()
                     file_id = uploaded_file.get('id')
+                    supportsAllDrives=True  # 加入這一行允許存取共用雲端硬碟
                 except Exception as e:
                     st.error(f"上傳 Drive 失敗：{e}")
                     continue
