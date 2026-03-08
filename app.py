@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
-# 1. API 金鑰與雲端連線設定
+# 1. API 金鑰與雲端連線設定 (加入自動修復標題列機制)
 # -----------------------------------------------------------------------------
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -45,17 +45,18 @@ try:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     sheet = gc.open_by_key(SHEET_ID).sheet1
     
-    # 【新增：自動檢測與修復標題列機制】
+    # 【新增】自動檢測與修復標題列 (並加入 delete_url 欄位)
     existing_data = sheet.get_all_values()
-    expected_headers = ['id', 'filename', 'category', 'description', 'file_id', 'upload_time']
+    expected_headers = ['id', 'filename', 'category', 'description', 'file_id', 'upload_time', 'delete_url']
     
     if not existing_data:
-        # 如果試算表是全空的，自動寫入標題列
         sheet.append_row(expected_headers)
     elif existing_data[0][0] != 'id':
-        # 如果第一列開頭不是 'id' (代表剛剛上傳的圖片不小心變成了標題)
-        # 程式會自動在最上方插入一行正確的標題列，把圖片資料往下擠
         sheet.insert_row(expected_headers, 1)
+    else:
+        # 升級舊版資料庫：如果已有標題但沒有 delete_url 欄位，自動補上
+        if len(existing_data[0]) < 7 or existing_data[0][6] != 'delete_url':
+            sheet.update_cell(1, 7, 'delete_url')
 
 except Exception as e:
     logger.error("Google Sheets 授權或連線初始化失敗", exc_info=True)
@@ -74,7 +75,7 @@ def get_base_categories():
 
 base_categories = get_base_categories()
 
-# 呼叫 ImgBB API 上傳圖片
+# 【修改】呼叫 ImgBB API 同時取得顯示網址與刪除網址
 def upload_to_imgbb(image_bytes, filename):
     url = "https://api.imgbb.com/1/upload"
     payload = {
@@ -84,18 +85,20 @@ def upload_to_imgbb(image_bytes, filename):
     }
     response = requests.post(url, data=payload)
     if response.status_code == 200:
-        return response.json()['data']['url'] # 回傳圖片的直連網址
+        data = response.json()['data']
+        # 回傳 (圖片直連網址, 專屬刪除網址)
+        return data['url'], data.get('delete_url', '')
     else:
         raise Exception(f"ImgBB 上傳失敗: {response.text}")
 
-def delete_image(image_id):
-    # ImgBB 圖床免費用戶不支援直接刪除 API，因此我們只要從資料庫(Google Sheets)中移除紀錄，畫面就不會再顯示了
+def delete_image_from_db(image_id):
     try:
         cell = sheet.find(image_id)
         if cell:
             sheet.delete_rows(cell.row)
     except Exception as e:
         logger.error(f"從 Sheets 刪除紀錄失敗 (image_id: {image_id})", exc_info=True)
+        st.error("刪除試算表紀錄失敗，請查看錯誤紀錄。")
 
 def update_image_info(image_id, new_category, new_description):
     try:
@@ -115,7 +118,7 @@ def get_total_images_count():
         return 0
 
 # -----------------------------------------------------------------------------
-# 3. 畫面設定、Session State 與側邊欄 (下載 Log 功能)
+# 3. 畫面設定、Session State 與對話框功能
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="雲端 AI 圖庫", layout="centered", initial_sidebar_state="collapsed")
 
@@ -161,6 +164,24 @@ def edit_image_dialog(img_id, current_cat, current_desc, base_cats, db_cats):
             st.rerun()
         else: st.error("分類名稱不可為空！")
 
+# 【新增】兩階段安全刪除對話框
+@st.dialog("🗑️ 確認刪除圖片")
+def delete_image_dialog(img_id, delete_url):
+    st.warning("您確定要徹底刪除這張圖片嗎？")
+    st.markdown("由於 ImgBB 免費版的 API 限制，程式無法直接替您刪除伺服器上的實體檔案。請依照以下兩個步驟完成刪除：")
+    
+    if delete_url:
+        # 第一步：引導使用者前往網頁手動點擊刪除
+        st.link_button("👉 第一步：點擊前往 ImgBB 網頁刪除實體檔案", url=delete_url)
+    else:
+        st.info("⚠️ 這張圖片是舊版上傳的，沒有保留到專屬的刪除網址，只能從清單中移除。")
+        
+    st.write("---")
+    # 第二步：從 Google Sheets 抹除資料
+    if st.button("👉 第二步：確認從我的雲端圖庫紀錄中移除", type="primary", width="stretch"):
+        delete_image_from_db(img_id)
+        st.rerun()
+
 tab_upload, tab_gallery = st.tabs(["📤 多檔上傳區", "🔍 智慧查詢區"])
 
 # -----------------------------------------------------------------------------
@@ -185,9 +206,9 @@ with tab_upload:
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 img_id = str(uuid.uuid4())
                 
-                # 1. 上傳至 ImgBB 圖床，取得公開網址
+                # 1. 上傳至 ImgBB 圖床，同時取得公開網址與刪除網址
                 try:
-                    img_url = upload_to_imgbb(bytes_data, file.name)
+                    img_url, delete_url = upload_to_imgbb(bytes_data, file.name)
                 except Exception as e:
                     logger.error(f"ImgBB 上傳失敗: {e}", exc_info=True)
                     st.error(f"檔案 {file.name} 上傳圖床失敗，已記錄至錯誤日誌。")
@@ -224,9 +245,9 @@ with tab_upload:
                         ai_category = "待分類"
                         ai_description = "AI 分析與文字擷取皆失敗，請手動確認。"
                 
-                # 3. 將資料寫入 Google Sheets (注意第五欄改存 img_url)
+                # 3. 將資料寫入 Google Sheets (加入第 7 欄 delete_url)
                 try:
-                    sheet.append_row([img_id, file.name, ai_category, ai_description, img_url, current_time])
+                    sheet.append_row([img_id, file.name, ai_category, ai_description, img_url, current_time, delete_url])
                 except Exception as e:
                     logger.error("寫入 Google Sheets 失敗", exc_info=True)
                     st.error(f"圖片分析完成，但寫入試算表失敗。")
@@ -293,9 +314,10 @@ with tab_gallery:
                 fname = str(row.get("filename", "未命名"))
                 cat = str(row.get("category", ""))
                 desc = str(row.get("description", ""))
-                # 第五欄現在直接是 img_url 網址了
-                img_url = str(row.get("file_id", "")) # 為了相容原本您的試算表標題列 file_id
+                img_url = str(row.get("file_id", "")) 
                 up_time = str(row.get("upload_time", ""))
+                # 【新增】取出儲存的專屬刪除網址
+                delete_url = str(row.get("delete_url", ""))
                 
                 with st.container():
                     if img_url and img_url.startswith("http"):
@@ -329,13 +351,13 @@ with tab_gallery:
                             if st.button("✏️ 修改", key=f"edit_{img_id}", width="stretch"):
                                 edit_image_dialog(img_id, cat, desc, base_categories, db_categories)
                         with col3:
+                            # 【修改】點擊刪除不再直接消失，而是開啟「兩階段安全刪除對話框」
                             if st.button("🗑️ 刪除", key=f"delete_{img_id}", width="stretch"):
-                                delete_image(img_id)
-                                st.rerun()
+                                delete_image_dialog(img_id, delete_url)
                     else:
                         st.error("這筆資料遺失了圖片網址。")
                         if st.button("清理這筆無效紀錄", key=f"cleanup_{img_id}"):
-                            delete_image(img_id)
+                            delete_image_from_db(img_id)
                             st.rerun()
                 st.divider()
         else:
