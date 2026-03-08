@@ -28,27 +28,31 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # 1. API 金鑰與雲端連線設定
 # -----------------------------------------------------------------------------
-try:
-    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-    IMGBB_API_KEY = st.secrets["IMGBB_API_KEY"]
-    SHEET_ID = st.secrets["SHEET_ID"]
-    gcp_creds_info = st.secrets["gcp_service_account"]
-except KeyError as e:
-    st.error(f"⚠️ 缺少環境變數：{e}。請確保已在 Streamlit Secrets 中設定。")
-    st.stop()
 
-# 授權 Google Sheets
+# 授權 Google Sheets 與防呆初始化
 try:
     SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
     credentials = Credentials.from_service_account_info(gcp_creds_info, scopes=SCOPES)
     gc = gspread.authorize(credentials)
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     sheet = gc.open_by_key(SHEET_ID).sheet1
+    
+    # 【新增：自動檢測與修復標題列機制】
+    existing_data = sheet.get_all_values()
+    expected_headers = ['id', 'filename', 'category', 'description', 'file_id', 'upload_time']
+    
+    if not existing_data:
+        # 如果試算表是全空的，自動寫入標題列
+        sheet.append_row(expected_headers)
+    elif existing_data[0][0] != 'id':
+        # 如果第一列開頭不是 'id' (代表剛剛上傳的圖片不小心變成了標題)
+        # 程式會自動在最上方插入一行正確的標題列，把圖片資料往下擠
+        sheet.insert_row(expected_headers, 1)
+
 except Exception as e:
     logger.error("Google Sheets 授權或連線初始化失敗", exc_info=True)
     st.error("無法連線到 Google Sheets，詳細錯誤已記錄至 ErrorLog.txt")
     st.stop()
-
 # -----------------------------------------------------------------------------
 # 2. 輔助功能定義：圖床與資料庫操作
 # -----------------------------------------------------------------------------
