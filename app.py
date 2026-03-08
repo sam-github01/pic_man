@@ -88,7 +88,7 @@ def get_total_images_count():
 # 2. 畫面設定、Session State 與對話框
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="雲端 AI 圖庫", layout="centered", initial_sidebar_state="collapsed")
-st.title("☁️ Google 隨身 AI 圖庫")
+st.title("☁️ Google 雲端 AI 圖庫")
 
 total_images = get_total_images_count()
 st.info(f"📁 目前 Google 雲端圖庫中共有 **{total_images}** 張圖片")
