@@ -5,6 +5,8 @@ from PIL import Image
 import io
 import pandas as pd
 import uuid
+import logging
+import os
 
 # Google 相關套件
 import gspread
@@ -13,82 +15,113 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
 # -----------------------------------------------------------------------------
-# 0. API 金鑰與 Google 雲端連線設定
+# 0. 設定錯誤日誌 (Logging)
+# -----------------------------------------------------------------------------
+# 設定將錯誤訊息寫入 ErrorLog.txt，並包含時間戳記與錯誤層級
+logging.basicConfig(
+    filename='ErrorLog.txt',
+    level=logging.ERROR,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    encoding='utf-8'
+)
+logger = logging.getLogger(__name__)
+
+# -----------------------------------------------------------------------------
+# 1. API 金鑰與 Google 雲端連線設定
 # -----------------------------------------------------------------------------
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
     DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
     SHEET_ID = st.secrets["SHEET_ID"]
-    # 取得 GCP 服務帳號憑證
     gcp_creds_info = st.secrets["gcp_service_account"]
 except KeyError as e:
     st.error(f"⚠️ 缺少環境變數：{e}。請確保已在 Streamlit Secrets 中設定。")
     st.stop()
 
 # 授權 Google Sheets 與 Google Drive
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-credentials = Credentials.from_service_account_info(gcp_creds_info, scopes=SCOPES)
-gc = gspread.authorize(credentials)
-drive_service = build('drive', 'v3', credentials=credentials)
-
-# 初始化 Google GenAI 用戶端
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
-
-# 連線到指定的 Google 試算表 (第一個工作表)
 try:
+    SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+    credentials = Credentials.from_service_account_info(gcp_creds_info, scopes=SCOPES)
+    gc = gspread.authorize(credentials)
+    drive_service = build('drive', 'v3', credentials=credentials)
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
     sheet = gc.open_by_key(SHEET_ID).sheet1
 except Exception as e:
-    st.error(f"無法連線到 Google Sheets，請確認共用權限與 Sheet ID 是否正確。錯誤：{e}")
+    logger.error("Google 授權或連線初始化失敗", exc_info=True)
+    st.error("無法連線到 Google 服務，詳細錯誤已記錄至 ErrorLog.txt")
     st.stop()
 
 # -----------------------------------------------------------------------------
-# 1. 輔助功能定義：資料庫操作 (透過 Google Sheets & Drive)
+# 2. 輔助功能定義：資料庫操作 (包含錯誤紀錄)
 # -----------------------------------------------------------------------------
 def get_base_categories():
     try:
         df = pd.read_csv("product.csv")
         return df['類別'].dropna().unique().tolist()
-    except Exception:
+    except Exception as e:
+        logger.error(f"讀取 product.csv 失敗: {e}", exc_info=True)
         return []
 
 base_categories = get_base_categories()
 
 def delete_image(image_id, file_id):
-    # 1. 從 Google Drive 刪除實體圖片
     if file_id:
         try:
             drive_service.files().delete(fileId=file_id).execute()
         except Exception as e:
-            st.error(f"無法從 Drive 刪除檔案：{e}")
+            logger.error(f"從 Drive 刪除檔案失敗 (file_id: {file_id})", exc_info=True)
+            st.error("無法從 Drive 刪除檔案，請查看錯誤紀錄。")
             
-    # 2. 從 Google Sheets 刪除該筆紀錄
     try:
         cell = sheet.find(image_id)
         if cell:
             sheet.delete_rows(cell.row)
-    except Exception:
-        pass # 若找不到紀錄則略過
+    except Exception as e:
+        logger.error(f"從 Sheets 刪除紀錄失敗 (image_id: {image_id})", exc_info=True)
 
 def update_image_info(image_id, new_category, new_description):
     try:
         cell = sheet.find(image_id)
         if cell:
-            # 更新分類 (第3欄) 與 說明 (第4欄)
             sheet.update_cell(cell.row, 3, new_category)
             sheet.update_cell(cell.row, 4, new_description)
     except Exception as e:
-        st.error(f"更新試算表失敗：{e}")
+        logger.error(f"更新 Sheets 分類說明失敗 (image_id: {image_id})", exc_info=True)
+        st.error("更新試算表失敗，請查看錯誤紀錄。")
 
 def get_total_images_count():
-    # 扣除第一行的標題列
-    records = sheet.get_all_values()
-    return max(0, len(records) - 1)
+    try:
+        records = sheet.get_all_values()
+        return max(0, len(records) - 1)
+    except Exception as e:
+        logger.error("取得試算表總數失敗", exc_info=True)
+        return 0
 
 # -----------------------------------------------------------------------------
-# 2. 畫面設定、Session State 與對話框
+# 3. 畫面設定、Session State 與側邊欄 (下載 Log 功能)
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="雲端 AI 圖庫", layout="centered", initial_sidebar_state="collapsed")
-st.title("☁️ Google 雲端 AI 圖庫")
+
+# 在側邊欄加入下載 ErrorLog.txt 的按鈕
+with st.sidebar:
+    st.header("🔧 系統管理")
+    if os.path.exists("ErrorLog.txt"):
+        with open("ErrorLog.txt", "r", encoding="utf-8") as f:
+            log_data = f.read()
+        st.download_button(
+            label="📥 下載錯誤紀錄 (ErrorLog.txt)",
+            data=log_data,
+            file_name="ErrorLog.txt",
+            mime="text/plain",
+            type="primary"
+        )
+        if st.button("🗑️ 清空錯誤紀錄"):
+            open("ErrorLog.txt", "w").close()
+            st.rerun()
+    else:
+        st.write("目前沒有錯誤紀錄。")
+
+st.title("☁️ Google 隨身 AI 圖庫")
 
 total_images = get_total_images_count()
 st.info(f"📁 目前 Google 雲端圖庫中共有 **{total_images}** 張圖片")
@@ -133,7 +166,7 @@ def edit_image_dialog(img_id, current_cat, current_desc, base_cats, db_cats):
 tab_upload, tab_gallery = st.tabs(["📤 多檔上傳區", "🔍 智慧查詢區"])
 
 # -----------------------------------------------------------------------------
-# 3. 框架一：上傳圖片至 Google Drive 與 AI 分析
+# 4. 框架一：上傳圖片至 Google Drive 與 AI 分析
 # -----------------------------------------------------------------------------
 with tab_upload:
     st.header("新增圖片")
@@ -154,7 +187,7 @@ with tab_upload:
                 bytes_data = file.getvalue()
                 safe_filename = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{file.name}"
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                img_id = str(uuid.uuid4()) # 產生資料庫唯一ID
+                img_id = str(uuid.uuid4())
                 
                 # 1. 上傳實體檔案至 Google Drive
                 file_metadata = {'name': safe_filename, 'parents': [DRIVE_FOLDER_ID]}
@@ -162,12 +195,13 @@ with tab_upload:
                 
                 try:
                     uploaded_file = drive_service.files().create(
-                        body=file_metadata, media_body=media, fields='id'
+                        body=file_metadata, media_body=media, fields='id', supportsAllDrives=True
                     ).execute()
                     file_id = uploaded_file.get('id')
-                    supportsAllDrives=True  # 加入這一行允許存取共用雲端硬碟
                 except Exception as e:
-                    st.error(f"上傳 Drive 失敗：{e}")
+                    # 【重要】將 403 等詳細錯誤完整記錄到 Log 中
+                    logger.error("Google Drive 上傳圖片發生錯誤", exc_info=True)
+                    st.error(f"檔案 {file.name} 上傳 Drive 失敗，詳細資訊已寫入錯誤紀錄檔。")
                     continue
                 
                 # 2. 使用 Gemini 分析圖片
@@ -191,14 +225,16 @@ with tab_upload:
                         elif line.startswith('說明：'): ai_description = line.replace('說明：', '').strip()
                     if not ai_category or not ai_description: raise ValueError("格式不符")
                         
-                except Exception:
+                except Exception as e:
+                    logger.warning("AI 第一層分析失敗，進入備用方案", exc_info=True)
                     try:
                         fallback_prompt = "請擷取這張圖片中的所有可見文字。如果沒有文字，請用一句話簡短描述畫面內容。"
                         fallback_resp = ai_client.models.generate_content(model='gemini-2.5-flash', contents=[fallback_prompt, img])
                         ai_category = "待分類"
                         ai_description = f"【擷取文字】{fallback_resp.text.strip()}"
                         if len(ai_description) > 250: ai_description = ai_description[:247] + "..."
-                    except Exception:
+                    except Exception as inner_e:
+                        logger.error("AI 備用方案也失敗", exc_info=True)
                         ai_category = "待分類"
                         ai_description = "AI 分析與文字擷取皆失敗，請手動確認。"
                 
@@ -206,31 +242,31 @@ with tab_upload:
                 try:
                     sheet.append_row([img_id, file.name, ai_category, ai_description, file_id, current_time])
                 except Exception as e:
-                    st.error(f"寫入試算表失敗：{e}")
+                    logger.error("寫入 Google Sheets 失敗", exc_info=True)
+                    st.error(f"圖片 {file.name} 分析完成，但寫入試算表失敗，請查看錯誤紀錄。")
                 
                 my_bar.progress((i + 1) / total_files, text=f"正在處理: {file.name} ({i+1}/{total_files})")
             
             my_bar.empty()
-            st.session_state.upload_success_msg = f"✅ 成功上傳 {total_files} 張圖片！檔案已存入您的 Google Drive。"
+            st.session_state.upload_success_msg = f"✅ 處理完畢！請確認是否有上傳失敗的檔案。"
             st.session_state.uploader_key = str(uuid.uuid4())
             st.rerun()
         else:
             st.warning("⚠️ 請先選擇要上傳的圖片。")
 
 # -----------------------------------------------------------------------------
-# 4. 框架二：向 Google Sheets 查詢與管理圖片
+# 5. 框架二：向 Google Sheets 查詢與管理圖片
 # -----------------------------------------------------------------------------
 with tab_gallery:
     st.header("尋找與管理雲端圖片")
     
-    # 讀取 Google Sheets 所有紀錄 (轉為 DataFrame 方便篩選)
     try:
         all_records = sheet.get_all_records()
         df_images = pd.DataFrame(all_records)
-    except Exception:
+    except Exception as e:
+        logger.error("讀取 Google Sheets 所有紀錄失敗", exc_info=True)
         df_images = pd.DataFrame()
     
-    # 取得資料庫中所有現有分類
     db_categories = []
     if not df_images.empty and 'category' in df_images.columns:
         db_categories = df_images['category'].dropna().unique().tolist()
@@ -249,9 +285,7 @@ with tab_gallery:
     st.text_input("🔍 或輸入關鍵字進一步查詢：", key="search_keyword")
     st.button("🧹 清除查詢", width="stretch", on_click=clear_search_state)
     
-    # 在 DataFrame 中進行篩選
     if not df_images.empty and (st.session_state.selected_category or st.session_state.search_keyword):
-        
         filtered_df = df_images.copy()
         
         if st.session_state.selected_category:
@@ -264,9 +298,7 @@ with tab_gallery:
                 filtered_df['description'].astype(str).str.lower().str.contains(kw)
             ]
             
-        # 依上傳時間反轉排序 (最新的在最上面)
         filtered_df = filtered_df.iloc[::-1]
-        
         results = filtered_df.to_dict('records')
         
         if len(results) > 0:
@@ -281,9 +313,7 @@ with tab_gallery:
                 
                 with st.container():
                     if file_id:
-                        # 產生 Google Drive 圖片直連網址
                         direct_img_url = f"https://drive.google.com/uc?id={file_id}"
-                        
                         try:
                             st.image(direct_img_url, width="stretch")
                         except Exception:
