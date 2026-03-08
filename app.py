@@ -28,6 +28,14 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------------------
 # 1. API 金鑰與雲端連線設定
 # -----------------------------------------------------------------------------
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+    IMGBB_API_KEY = st.secrets["IMGBB_API_KEY"]
+    SHEET_ID = st.secrets["SHEET_ID"]
+    gcp_creds_info = st.secrets["gcp_service_account"]
+except KeyError as e:
+    st.error(f"⚠️ 缺少環境變數：{e}。請確保已在 Streamlit Secrets 中設定。")
+    st.stop()
 
 # 授權 Google Sheets 與防呆初始化
 try:
@@ -53,6 +61,7 @@ except Exception as e:
     logger.error("Google Sheets 授權或連線初始化失敗", exc_info=True)
     st.error("無法連線到 Google Sheets，詳細錯誤已記錄至 ErrorLog.txt")
     st.stop()
+
 # -----------------------------------------------------------------------------
 # 2. 輔助功能定義：圖床與資料庫操作
 # -----------------------------------------------------------------------------
