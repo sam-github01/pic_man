@@ -1,3 +1,5 @@
+#雲端 AI 智慧圖庫 13
+
 import streamlit as st
 from datetime import datetime
 from google import genai
@@ -26,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
-# 1. API 金鑰與雲端連線設定 (加入自動修復標題列機制)
+# 1. API 金鑰與雲端連線設定
 # -----------------------------------------------------------------------------
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -45,7 +47,7 @@ try:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     sheet = gc.open_by_key(SHEET_ID).sheet1
     
-    # 【新增】自動檢測與修復標題列 (並加入 delete_url 欄位)
+    # 自動檢測與修復標題列
     existing_data = sheet.get_all_values()
     expected_headers = ['id', 'filename', 'category', 'description', 'file_id', 'upload_time', 'delete_url']
     
@@ -54,7 +56,6 @@ try:
     elif existing_data[0][0] != 'id':
         sheet.insert_row(expected_headers, 1)
     else:
-        # 升級舊版資料庫：如果已有標題但沒有 delete_url 欄位，自動補上
         if len(existing_data[0]) < 7 or existing_data[0][6] != 'delete_url':
             sheet.update_cell(1, 7, 'delete_url')
 
@@ -75,7 +76,6 @@ def get_base_categories():
 
 base_categories = get_base_categories()
 
-# 【修改】呼叫 ImgBB API 同時取得顯示網址與刪除網址
 def upload_to_imgbb(image_bytes, filename):
     url = "https://api.imgbb.com/1/upload"
     payload = {
@@ -86,7 +86,6 @@ def upload_to_imgbb(image_bytes, filename):
     response = requests.post(url, data=payload)
     if response.status_code == 200:
         data = response.json()['data']
-        # 回傳 (圖片直連網址, 專屬刪除網址)
         return data['url'], data.get('delete_url', '')
     else:
         raise Exception(f"ImgBB 上傳失敗: {response.text}")
@@ -140,6 +139,8 @@ st.caption("⚡ Powered by Google Sheets, ImgBB & Gemini")
 if 'selected_category' not in st.session_state: st.session_state.selected_category = None
 if 'uploader_key' not in st.session_state: st.session_state.uploader_key = str(uuid.uuid4())
 if 'search_keyword' not in st.session_state: st.session_state.search_keyword = ""
+# 初始化錯誤訊息暫存陣列
+if 'upload_errors' not in st.session_state: st.session_state.upload_errors = []
 
 def clear_search_state():
     st.session_state.selected_category = None
@@ -156,7 +157,7 @@ def edit_image_dialog(img_id, current_cat, current_desc, base_cats, db_cats):
         
     new_cat = st.selectbox("修改分類", options=all_options, index=default_idx)
     final_cat = st.text_input("輸入新分類名稱：") if new_cat == "➕ 自行輸入新分類..." else new_cat
-    new_desc = st.text_area("修改說明 (最多 200 字)", value=current_desc, max_chars=200, height=150)
+    new_desc = st.text_area("修改說明", value=current_desc, height=200)
     
     if st.button("💾 儲存修改", width="stretch"):
         if final_cat.strip():
@@ -164,20 +165,17 @@ def edit_image_dialog(img_id, current_cat, current_desc, base_cats, db_cats):
             st.rerun()
         else: st.error("分類名稱不可為空！")
 
-# 【新增】兩階段安全刪除對話框
 @st.dialog("🗑️ 確認刪除圖片")
 def delete_image_dialog(img_id, delete_url):
     st.warning("您確定要徹底刪除這張圖片嗎？")
     st.markdown("由於 ImgBB 免費版的 API 限制，程式無法直接替您刪除伺服器上的實體檔案。請依照以下兩個步驟完成刪除：")
     
     if delete_url:
-        # 第一步：引導使用者前往網頁手動點擊刪除
         st.link_button("👉 第一步：點擊前往 ImgBB 網頁刪除實體檔案", url=delete_url)
     else:
-        st.info("⚠️ 這張圖片是舊版上傳的，沒有保留到專屬的刪除網址，只能從清單中移除。")
+        st.info("⚠️ 這張圖片沒有保留到專屬的刪除網址，只能從清單中移除。")
         
     st.write("---")
-    # 第二步：從 Google Sheets 抹除資料
     if st.button("👉 第二步：確認從我的雲端圖庫紀錄中移除", type="primary", width="stretch"):
         delete_image_from_db(img_id)
         st.rerun()
@@ -189,11 +187,22 @@ tab_upload, tab_gallery = st.tabs(["📤 多檔上傳區", "🔍 智慧查詢區
 # -----------------------------------------------------------------------------
 with tab_upload:
     st.header("新增圖片")
+    
+    # 【新增】顯示暫存的成功與錯誤訊息
     if "upload_success_msg" in st.session_state:
         st.success(st.session_state.upload_success_msg)
         del st.session_state.upload_success_msg
+        
+    if "upload_errors" in st.session_state and len(st.session_state.upload_errors) > 0:
+        for err_msg in st.session_state.upload_errors:
+            st.error(err_msg)
+        # 顯示完畢後清空錯誤陣列，避免下次重整又跑出來
+        st.session_state.upload_errors = []
     
     uploaded_files = st.file_uploader("選擇圖片", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key=st.session_state.uploader_key)
+    
+    if uploaded_files:
+        st.info(f"📎 目前已選擇 **{len(uploaded_files)}** 張圖片準備上傳")
     
     if st.button("💾 自動分類並上傳至雲端", width="stretch"):
         if uploaded_files:
@@ -206,15 +215,13 @@ with tab_upload:
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 img_id = str(uuid.uuid4())
                 
-                # 1. 上傳至 ImgBB 圖床，同時取得公開網址與刪除網址
                 try:
                     img_url, delete_url = upload_to_imgbb(bytes_data, file.name)
                 except Exception as e:
                     logger.error(f"ImgBB 上傳失敗: {e}", exc_info=True)
-                    st.error(f"檔案 {file.name} 上傳圖床失敗，已記錄至錯誤日誌。")
+                    st.session_state.upload_errors.append(f"❌ 檔案 **{file.name}** 圖片上傳至圖床失敗，請稍後再試。")
                     continue
                 
-                # 2. 使用 Gemini 分析圖片
                 img = Image.open(io.BytesIO(bytes_data))
                 try:
                     prompt = f"""請客觀分析這張圖片的主要內容。
@@ -240,22 +247,34 @@ with tab_upload:
                         fallback_resp = ai_client.models.generate_content(model='gemini-2.5-flash', contents=[fallback_prompt, img])
                         ai_category = "待分類"
                         ai_description = f"【擷取文字】{fallback_resp.text.strip()}"
-                        if len(ai_description) > 250: ai_description = ai_description[:247] + "..."
+                        
+                        if len(ai_description) > 500: 
+                            ai_description = ai_description[:497] + "..."
+                            
                     except Exception as inner_e:
+                        logger.error(f"AI 雙層分析皆失敗 ({file.name})", exc_info=True)
                         ai_category = "待分類"
                         ai_description = "AI 分析與文字擷取皆失敗，請手動確認。"
+                        
+                        # 【新增】當 AI 完全失敗時，將具體解決方案寫入錯誤訊息陣列
+                        st.session_state.upload_errors.append(
+                            f"⚠️ **{file.name}** AI 分析失敗！\n\n"
+                            f"**解決方式：**\n"
+                            f"1. **手動補齊**：圖片已成功存入雲端，請至「智慧查詢區」找到該張圖片，點擊「✏️ 修改」手動輸入分類與說明。\n"
+                            f"2. **API 頻寬限制**：若短時間內上傳過多圖片，請稍等 1 分鐘後再試。\n"
+                            f"3. **格式不符**：請確認圖片內容是否過於複雜或無法辨識。"
+                        )
                 
-                # 3. 將資料寫入 Google Sheets (加入第 7 欄 delete_url)
                 try:
                     sheet.append_row([img_id, file.name, ai_category, ai_description, img_url, current_time, delete_url])
                 except Exception as e:
                     logger.error("寫入 Google Sheets 失敗", exc_info=True)
-                    st.error(f"圖片分析完成，但寫入試算表失敗。")
+                    st.session_state.upload_errors.append(f"❌ 檔案 **{file.name}** 寫入試算表資料庫失敗。")
                 
                 my_bar.progress((i + 1) / total_files, text=f"正在處理: {file.name} ({i+1}/{total_files})")
             
             my_bar.empty()
-            st.session_state.upload_success_msg = f"✅ 成功上傳 {total_files} 張圖片！檔案已存入雲端圖床與 Google Sheets。"
+            st.session_state.upload_success_msg = f"✅ 批次處理完畢！本次共選取 {total_files} 張圖片。"
             st.session_state.uploader_key = str(uuid.uuid4())
             st.rerun()
         else:
@@ -277,6 +296,11 @@ with tab_gallery:
     if not df_images.empty and 'category' in df_images.columns:
         db_categories = df_images['category'].dropna().unique().tolist()
     
+    st.text_input("🔍 輸入關鍵字查詢 (如：保養、果汁)：", key="search_keyword")
+    st.button("🧹 清除查詢", width="stretch", on_click=clear_search_state)
+    
+    st.divider()
+    
     st.write("🏷️ **快速分類查詢：**")
     cols = st.columns(4)
     for i, cat in enumerate(db_categories):
@@ -287,9 +311,6 @@ with tab_gallery:
 
     st.caption(f"目前檢視分類：**{st.session_state.selected_category if st.session_state.selected_category else '無'}**")
     st.divider()
-    
-    st.text_input("🔍 或輸入關鍵字進一步查詢：", key="search_keyword")
-    st.button("🧹 清除查詢", width="stretch", on_click=clear_search_state)
     
     if not df_images.empty and (st.session_state.selected_category or st.session_state.search_keyword):
         filtered_df = df_images.copy()
@@ -316,7 +337,6 @@ with tab_gallery:
                 desc = str(row.get("description", ""))
                 img_url = str(row.get("file_id", "")) 
                 up_time = str(row.get("upload_time", ""))
-                # 【新增】取出儲存的專屬刪除網址
                 delete_url = str(row.get("delete_url", ""))
                 
                 with st.container():
@@ -351,7 +371,6 @@ with tab_gallery:
                             if st.button("✏️ 修改", key=f"edit_{img_id}", width="stretch"):
                                 edit_image_dialog(img_id, cat, desc, base_categories, db_categories)
                         with col3:
-                            # 【修改】點擊刪除不再直接消失，而是開啟「兩階段安全刪除對話框」
                             if st.button("🗑️ 刪除", key=f"delete_{img_id}", width="stretch"):
                                 delete_image_dialog(img_id, delete_url)
                     else:
