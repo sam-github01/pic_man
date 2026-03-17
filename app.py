@@ -1,5 +1,4 @@
-#雲端 AI 智慧圖庫 13
-
+#雲端 AI 智慧圖庫 14
 import streamlit as st
 from datetime import datetime
 from google import genai
@@ -117,7 +116,7 @@ def get_total_images_count():
         return 0
 
 # -----------------------------------------------------------------------------
-# 3. 畫面設定、Session State 與對話框功能
+# 3. 畫面設定、Session State 與互斥 Callback 功能
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="雲端 AI 圖庫", layout="centered", initial_sidebar_state="collapsed")
 
@@ -136,11 +135,20 @@ total_images = get_total_images_count()
 st.info(f"📁 目前雲端圖庫中共有 **{total_images}** 張圖片")
 st.caption("⚡ Powered by Google Sheets, ImgBB & Gemini")
 
+# 狀態變數初始化
 if 'selected_category' not in st.session_state: st.session_state.selected_category = None
 if 'uploader_key' not in st.session_state: st.session_state.uploader_key = str(uuid.uuid4())
 if 'search_keyword' not in st.session_state: st.session_state.search_keyword = ""
-# 初始化錯誤訊息暫存陣列
 if 'upload_errors' not in st.session_state: st.session_state.upload_errors = []
+
+# 【新增】互斥設計：點擊分類時清空關鍵字
+def on_category_click(cat):
+    st.session_state.selected_category = cat
+    st.session_state.search_keyword = ""
+
+# 【新增】互斥設計：輸入關鍵字時清空分類
+def on_keyword_change():
+    st.session_state.selected_category = None
 
 def clear_search_state():
     st.session_state.selected_category = None
@@ -188,7 +196,6 @@ tab_upload, tab_gallery = st.tabs(["📤 多檔上傳區", "🔍 智慧查詢區
 with tab_upload:
     st.header("新增圖片")
     
-    # 【新增】顯示暫存的成功與錯誤訊息
     if "upload_success_msg" in st.session_state:
         st.success(st.session_state.upload_success_msg)
         del st.session_state.upload_success_msg
@@ -196,7 +203,6 @@ with tab_upload:
     if "upload_errors" in st.session_state and len(st.session_state.upload_errors) > 0:
         for err_msg in st.session_state.upload_errors:
             st.error(err_msg)
-        # 顯示完畢後清空錯誤陣列，避免下次重整又跑出來
         st.session_state.upload_errors = []
     
     uploaded_files = st.file_uploader("選擇圖片", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True, key=st.session_state.uploader_key)
@@ -255,8 +261,6 @@ with tab_upload:
                         logger.error(f"AI 雙層分析皆失敗 ({file.name})", exc_info=True)
                         ai_category = "待分類"
                         ai_description = "AI 分析與文字擷取皆失敗，請手動確認。"
-                        
-                        # 【新增】當 AI 完全失敗時，將具體解決方案寫入錯誤訊息陣列
                         st.session_state.upload_errors.append(
                             f"⚠️ **{file.name}** AI 分析失敗！\n\n"
                             f"**解決方式：**\n"
@@ -269,7 +273,7 @@ with tab_upload:
                     sheet.append_row([img_id, file.name, ai_category, ai_description, img_url, current_time, delete_url])
                 except Exception as e:
                     logger.error("寫入 Google Sheets 失敗", exc_info=True)
-                    st.session_state.upload_errors.append(f"❌ 檔案 **{file.name}** 寫入試算表資料庫失敗。")
+                    st.session_state.upload_errors.append(f"❌ 檔案 **{file.name}** 寫入試算表庫庫失敗。")
                 
                 my_bar.progress((i + 1) / total_files, text=f"正在處理: {file.name} ({i+1}/{total_files})")
             
@@ -296,7 +300,8 @@ with tab_gallery:
     if not df_images.empty and 'category' in df_images.columns:
         db_categories = df_images['category'].dropna().unique().tolist()
     
-    st.text_input("🔍 輸入關鍵字查詢 (如：保養、果汁)：", key="search_keyword")
+    # 【修改重點 1】在搜尋框綁定 on_change 互斥事件
+    st.text_input("🔍 輸入關鍵字查詢 (如：保養、果汁)：", key="search_keyword", on_change=on_keyword_change)
     st.button("🧹 清除查詢", width="stretch", on_click=clear_search_state)
     
     st.divider()
@@ -306,19 +311,27 @@ with tab_gallery:
     for i, cat in enumerate(db_categories):
         col_idx = i % 4
         btn_label = f"🔴 {cat}" if cat == "待分類" else cat
-        if cols[col_idx].button(btn_label, width="stretch"):
-            st.session_state.selected_category = cat
+        # 【修改重點 2】在按鈕綁定 on_click 互斥事件
+        cols[col_idx].button(btn_label, width="stretch", key=f"cat_btn_{i}", on_click=on_category_click, args=(cat,))
 
-    st.caption(f"目前檢視分類：**{st.session_state.selected_category if st.session_state.selected_category else '無'}**")
+    # 【新增】動態顯示目前的查詢模式，讓使用者一目瞭然
+    if st.session_state.selected_category:
+        st.caption(f"目前檢視分類：**{st.session_state.selected_category}**")
+    elif st.session_state.search_keyword:
+        st.caption(f"目前搜尋關鍵字：**{st.session_state.search_keyword}**")
+    else:
+        st.caption("目前檢視：**無 (請選擇上方查詢條件)**")
+        
     st.divider()
     
+    # 【修改重點 3】將查詢邏輯改為獨立 (if / elif)，確保兩者絕對不交集
     if not df_images.empty and (st.session_state.selected_category or st.session_state.search_keyword):
         filtered_df = df_images.copy()
         
         if st.session_state.selected_category:
             filtered_df = filtered_df[filtered_df['category'] == st.session_state.selected_category]
             
-        if st.session_state.search_keyword:
+        elif st.session_state.search_keyword:
             kw = str(st.session_state.search_keyword).lower()
             filtered_df = filtered_df[
                 filtered_df['filename'].astype(str).str.lower().str.contains(kw) |
