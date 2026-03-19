@@ -1,4 +1,4 @@
-#雲端 AI 智慧圖庫 14
+#雲端 AI 智慧圖庫 15
 import streamlit as st
 from datetime import datetime
 from google import genai
@@ -46,7 +46,6 @@ try:
     ai_client = genai.Client(api_key=GEMINI_API_KEY)
     sheet = gc.open_by_key(SHEET_ID).sheet1
     
-    # 自動檢測與修復標題列
     existing_data = sheet.get_all_values()
     expected_headers = ['id', 'filename', 'category', 'description', 'file_id', 'upload_time', 'delete_url']
     
@@ -135,18 +134,15 @@ total_images = get_total_images_count()
 st.info(f"📁 目前雲端圖庫中共有 **{total_images}** 張圖片")
 st.caption("⚡ Powered by Google Sheets, ImgBB & Gemini")
 
-# 狀態變數初始化
 if 'selected_category' not in st.session_state: st.session_state.selected_category = None
 if 'uploader_key' not in st.session_state: st.session_state.uploader_key = str(uuid.uuid4())
 if 'search_keyword' not in st.session_state: st.session_state.search_keyword = ""
 if 'upload_errors' not in st.session_state: st.session_state.upload_errors = []
 
-# 【新增】互斥設計：點擊分類時清空關鍵字
 def on_category_click(cat):
     st.session_state.selected_category = cat
     st.session_state.search_keyword = ""
 
-# 【新增】互斥設計：輸入關鍵字時清空分類
 def on_keyword_change():
     st.session_state.selected_category = None
 
@@ -165,7 +161,7 @@ def edit_image_dialog(img_id, current_cat, current_desc, base_cats, db_cats):
         
     new_cat = st.selectbox("修改分類", options=all_options, index=default_idx)
     final_cat = st.text_input("輸入新分類名稱：") if new_cat == "➕ 自行輸入新分類..." else new_cat
-    new_desc = st.text_area("修改說明", value=current_desc, height=200)
+    new_desc = st.text_area("修改說明", value=current_desc, height=300)
     
     if st.button("💾 儲存修改", width="stretch"):
         if final_cat.strip():
@@ -230,37 +226,68 @@ with tab_upload:
                 
                 img = Image.open(io.BytesIO(bytes_data))
                 try:
+                    # 【修改重點 1】在 Prompt 中明確要求輸出第三段「擷取文字」
                     prompt = f"""請客觀分析這張圖片的主要內容。
                     1. 分類：請優先從下列預設選項中挑選一個最適合的分類：
                     【{categories_str}】
                     如果都不適合，請自行創造一個最貼切的簡短分類名稱（限 5 個字以內）。
                     2. 說明：請用 200 個字以內的正體中文，詳盡總結圖片的核心視覺元素、主要文字訊息或主打用途。
+                    3. 擷取文字：請將圖片中所有可見的文字完整擷取下來。如果沒有文字，請填寫「無」。
                     請嚴格依照以下格式回覆：
                     分類：[填入分類]
-                    說明：[填入說明]"""
+                    說明：[填入說明]
+                    擷取文字：[填入擷取文字]"""
+                    
                     response = ai_client.models.generate_content(model='gemini-2.5-flash', contents=[prompt, img])
                     result_text = response.text.strip()
                     
-                    ai_category, ai_description = "", ""
+                    # 【修改重點 2】強化解析邏輯，支援多行的說明與擷取文字
+                    ai_category, ai_description, ai_extracted = "", "", ""
+                    current_key = None
+                    
                     for line in result_text.split('\n'):
-                        if line.startswith('分類：'): ai_category = line.replace('分類：', '').strip()
-                        elif line.startswith('說明：'): ai_description = line.replace('說明：', '').strip()
+                        if line.startswith('分類：'):
+                            ai_category = line.replace('分類：', '').strip()
+                            current_key = 'category'
+                        elif line.startswith('說明：'):
+                            ai_description = line.replace('說明：', '').strip()
+                            current_key = 'description'
+                        elif line.startswith('擷取文字：'):
+                            ai_extracted = line.replace('擷取文字：', '').strip()
+                            current_key = 'extracted'
+                        else:
+                            # 處理跨行的文字
+                            if current_key == 'description':
+                                ai_description += "\n" + line.strip()
+                            elif current_key == 'extracted':
+                                ai_extracted += "\n" + line.strip()
+                                
                     if not ai_category or not ai_description: raise ValueError("格式不符")
+                    
+                    # 限制擷取文字長度
+                    if len(ai_extracted) > 500: ai_extracted = ai_extracted[:497] + "..."
+                    
+                    # 組合最終的說明內容
+                    final_description = ai_description
+                    if ai_extracted and ai_extracted != "無":
+                        final_description += f"\n\n【擷取文字】\n{ai_extracted}"
                         
                 except Exception as e:
+                    # 備用方案 (Fallback)：只有擷取文字
                     try:
                         fallback_prompt = "請擷取這張圖片中的所有可見文字。如果沒有文字，請用一句話簡短描述畫面內容。"
                         fallback_resp = ai_client.models.generate_content(model='gemini-2.5-flash', contents=[fallback_prompt, img])
                         ai_category = "待分類"
-                        ai_description = f"【擷取文字】{fallback_resp.text.strip()}"
+                        ai_extracted = fallback_resp.text.strip()
                         
-                        if len(ai_description) > 500: 
-                            ai_description = ai_description[:497] + "..."
+                        if len(ai_extracted) > 500: 
+                            ai_extracted = ai_extracted[:497] + "..."
+                        final_description = f"【擷取文字】\n{ai_extracted}"
                             
                     except Exception as inner_e:
                         logger.error(f"AI 雙層分析皆失敗 ({file.name})", exc_info=True)
                         ai_category = "待分類"
-                        ai_description = "AI 分析與文字擷取皆失敗，請手動確認。"
+                        final_description = "AI 分析與文字擷取皆失敗，請手動確認。"
                         st.session_state.upload_errors.append(
                             f"⚠️ **{file.name}** AI 分析失敗！\n\n"
                             f"**解決方式：**\n"
@@ -270,10 +297,10 @@ with tab_upload:
                         )
                 
                 try:
-                    sheet.append_row([img_id, file.name, ai_category, ai_description, img_url, current_time, delete_url])
+                    sheet.append_row([img_id, file.name, ai_category, final_description, img_url, current_time, delete_url])
                 except Exception as e:
                     logger.error("寫入 Google Sheets 失敗", exc_info=True)
-                    st.session_state.upload_errors.append(f"❌ 檔案 **{file.name}** 寫入試算表庫庫失敗。")
+                    st.session_state.upload_errors.append(f"❌ 檔案 **{file.name}** 寫入試算表資料庫失敗。")
                 
                 my_bar.progress((i + 1) / total_files, text=f"正在處理: {file.name} ({i+1}/{total_files})")
             
@@ -300,7 +327,6 @@ with tab_gallery:
     if not df_images.empty and 'category' in df_images.columns:
         db_categories = df_images['category'].dropna().unique().tolist()
     
-    # 【修改重點 1】在搜尋框綁定 on_change 互斥事件
     st.text_input("🔍 輸入關鍵字查詢 (如：保養、果汁)：", key="search_keyword", on_change=on_keyword_change)
     st.button("🧹 清除查詢", width="stretch", on_click=clear_search_state)
     
@@ -311,10 +337,8 @@ with tab_gallery:
     for i, cat in enumerate(db_categories):
         col_idx = i % 4
         btn_label = f"🔴 {cat}" if cat == "待分類" else cat
-        # 【修改重點 2】在按鈕綁定 on_click 互斥事件
         cols[col_idx].button(btn_label, width="stretch", key=f"cat_btn_{i}", on_click=on_category_click, args=(cat,))
 
-    # 【新增】動態顯示目前的查詢模式，讓使用者一目瞭然
     if st.session_state.selected_category:
         st.caption(f"目前檢視分類：**{st.session_state.selected_category}**")
     elif st.session_state.search_keyword:
@@ -324,7 +348,6 @@ with tab_gallery:
         
     st.divider()
     
-    # 【修改重點 3】將查詢邏輯改為獨立 (if / elif)，確保兩者絕對不交集
     if not df_images.empty and (st.session_state.selected_category or st.session_state.search_keyword):
         filtered_df = df_images.copy()
         
@@ -360,7 +383,8 @@ with tab_gallery:
                             st.warning("圖片載入失敗，圖床可能暫時無回應。")
                         
                         st.markdown(f"**分類:** `{cat}`")
-                        st.markdown(f"**分析/內容:** {desc}") 
+                        # 因為我們將文字與說明合併了，使用 st.text 會保留原有的換行格式，比 markdown 更好閱讀長文
+                        st.text(f"分析/內容:\n{desc}") 
                         st.caption(f"上傳時間: {up_time}")
                         
                         if cat == "待分類":
